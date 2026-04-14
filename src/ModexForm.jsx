@@ -120,17 +120,19 @@ export default function ModexForm() {
     catch (e) { console.error("Save failed:", e); }
   };
 
-  const pushToSheets = (entry) => {
+  const pushToSheets = async (entry) => {
+    setSyncStatus("syncing");
     try {
       const params = new URLSearchParams({ data: JSON.stringify(entry) });
-      window.open(`${SHEETS_URL}?${params.toString()}`, "_blank");
+      // Use no-cors fetch instead of window.open — works on Android Chrome without popup blocking
+      await fetch(`${SHEETS_URL}?${params.toString()}`, { method: "GET", mode: "no-cors" });
       setSyncStatus("ok");
       // Refresh sheet data after a short delay to pick up new entry
-      setTimeout(fetchSheetData, 3000);
+      setTimeout(fetchSheetData, 4000);
     } catch {
       setSyncStatus("fail");
     }
-    setTimeout(() => setSyncStatus(null), 4000);
+    setTimeout(() => setSyncStatus(null), 5000);
   };
 
   const resetForm = () => { setForm({ ...BLANK_FORM }); setStep(0); };
@@ -151,7 +153,7 @@ export default function ModexForm() {
       id: Date.now().toString(),
     };
     saveLocalEntries([entry, ...localEntries]);
-    pushToSheets(entry);
+    await pushToSheets(entry);
     resetForm();
     setView("list");
   };
