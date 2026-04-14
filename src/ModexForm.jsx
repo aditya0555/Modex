@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 
 const TEAM = ["Aditya", "Roshail", "Raunaq"];
 const COMPANY_TYPES = [
@@ -19,6 +19,48 @@ const PRIORITIES = [
 ];
 const STORAGE_KEY = "modex-2026-entries";
 const SHEETS_URL = "https://script.google.com/macros/s/AKfycbwQGD8yZytCL5_3CBhYYiYX6fzrUmZanJhQKo3XH6cUPLi_eguM1UF_TOFxHAFzqtyGuw/exec";
+const SHEET_ID = "1k8gjd1UHVCfVc4rEskpJJC5Z7VPl-6NxNtrNgFBto1Q";
+const SHEET_CSV_URL = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:csv&sheet=Sheet1`;
+
+// Parse CSV from Google Sheets into entry objects
+function parseSheetCSV(csv) {
+  const lines = csv.trim().split("\n");
+  if (lines.length < 2) return [];
+  // Skip header row
+  return lines.slice(1).map((line, idx) => {
+    // Handle quoted CSV fields properly
+    const cols = [];
+    let cur = "", inQ = false;
+    for (let i = 0; i < line.length; i++) {
+      if (line[i] === '"' && !inQ) { inQ = true; continue; }
+      if (line[i] === '"' && inQ && line[i+1] === '"') { cur += '"'; i++; continue; }
+      if (line[i] === '"' && inQ) { inQ = false; continue; }
+      if (line[i] === ',' && !inQ) { cols.push(cur); cur = ""; continue; }
+      cur += line[i];
+    }
+    cols.push(cur);
+    // Map columns: Timestamp,Recorder,Company,Contact,Title,Type,Industry,Automation Level,Pain Point,Top Manual Tasks,Building (Peer),Collab Angle,Other Notes,Priority,Follow-up Notes
+    const typeRaw = (cols[5] || "").trim();
+    return {
+      id: `sheet-${idx}-${cols[0]}`,
+      timestamp: cols[0] || "",
+      recorder: cols[1] || "",
+      companyName: cols[2] || "",
+      contactName: cols[3] || "",
+      contactTitle: cols[4] || "",
+      companyType: typeRaw,
+      industry: cols[6] || "",
+      automationLevel: cols[7] || "",
+      painPoint: cols[8] || "",
+      topTasks: cols[9] || "",
+      peerBuilding: cols[10] || "",
+      collabAngle: cols[11] || "",
+      otherNotes: cols[12] || "",
+      priority: cols[13] || "",
+      notes: cols[14] || "",
+    };
+  }).filter(e => e.companyName);
+}
 
 const BLANK_FORM = {
   recorder: "", companyName: "", contactName: "", contactTitle: "",
@@ -28,27 +70,52 @@ const BLANK_FORM = {
 };
 
 export default function ModexForm() {
-  const [entries, setEntries] = useState([]);
+  // localEntries = entries saved on this device (for list/detail view)
+  const [localEntries, setLocalEntries] = useState([]);
+  // sheetEntries = live data from Google Sheets (for stats/leaderboard)
+  const [sheetEntries, setSheetEntries] = useState([]);
+  const [sheetLoading, setSheetLoading] = useState(true);
+  const [sheetError, setSheetError] = useState(false);
   const [view, setView] = useState("form");
   const [detailIdx, setDetailIdx] = useState(null);
   const [loading, setLoading] = useState(true);
   const [step, setStep] = useState(0);
   const [form, setForm] = useState({ ...BLANK_FORM });
-  // FIX: sheets sync status indicator
-  const [syncStatus, setSyncStatus] = useState(null); // null | "syncing" | "ok" | "fail"
+  const [syncStatus, setSyncStatus] = useState(null);
 
+  // Load local entries from localStorage
   useEffect(() => {
-    (async () => {
-      try {
-        const result = { value: localStorage.getItem(STORAGE_KEY) };
-        if (result?.value) setEntries(JSON.parse(result.value));
-      } catch {}
-      setLoading(false);
-    })();
+    try {
+      const stored = localStorage.getItem(STORAGE_KEY);
+      if (stored) setLocalEntries(JSON.parse(stored));
+    } catch {}
+    setLoading(false);
   }, []);
 
-  const saveEntries = async (newEntries) => {
-    setEntries(newEntries);
+  // Fetch live data from Google Sheets
+  const fetchSheetData = useCallback(async () => {
+    setSheetLoading(true);
+    setSheetError(false);
+    try {
+      const res = await fetch(SHEET_CSV_URL);
+      if (!res.ok) throw new Error("fetch failed");
+      const text = await res.text();
+      setSheetEntries(parseSheetCSV(text));
+    } catch {
+      setSheetError(true);
+    }
+    setSheetLoading(false);
+  }, []);
+
+  useEffect(() => {
+    fetchSheetData();
+    // Auto-refresh every 60 seconds
+    const interval = setInterval(fetchSheetData, 60000);
+    return () => clearInterval(interval);
+  }, [fetchSheetData]);
+
+  const saveLocalEntries = (newEntries) => {
+    setLocalEntries(newEntries);
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(newEntries)); }
     catch (e) { console.error("Save failed:", e); }
   };
@@ -58,6 +125,8 @@ export default function ModexForm() {
       const params = new URLSearchParams({ data: JSON.stringify(entry) });
       window.open(`${SHEETS_URL}?${params.toString()}`, "_blank");
       setSyncStatus("ok");
+      // Refresh sheet data after a short delay to pick up new entry
+      setTimeout(fetchSheetData, 3000);
     } catch {
       setSyncStatus("fail");
     }
@@ -67,7 +136,6 @@ export default function ModexForm() {
   const resetForm = () => { setForm({ ...BLANK_FORM }); setStep(0); };
 
   const handleSubmit = async () => {
-    // FIX: trim all text fields before saving
     const entry = {
       ...form,
       companyName: form.companyName.trim(),
@@ -82,22 +150,20 @@ export default function ModexForm() {
       timestamp: new Date().toISOString(),
       id: Date.now().toString(),
     };
-    await saveEntries([entry, ...entries]);
-    await pushToSheets(entry);
+    saveLocalEntries([entry, ...localEntries]);
+    pushToSheets(entry);
     resetForm();
     setView("list");
   };
 
-  const handleDelete = async (id) => {
-    await saveEntries(entries.filter(e => e.id !== id));
-    // FIX: reset detailIdx on delete to prevent stale index
+  const handleDelete = (id) => {
+    saveLocalEntries(localEntries.filter(e => e.id !== id));
     setDetailIdx(null);
     setView("list");
   };
 
   const isCustomer = form.companyType === "customer";
   const totalSteps = isCustomer ? 5 : 4;
-  // Final (priority) screen is always at step 4; non-customers jump from step 3 → 4
   const finalStep = 4;
 
   const canAdvance = () => {
@@ -135,6 +201,7 @@ export default function ModexForm() {
   };
 
   const chipStyle = (sel) => ({ ...s.optionBtn(sel), width: "auto", display: "inline-block", padding: "10px 14px", fontSize: 13 });
+  const priorityColor = { hot: "#dc2626", warm: "#f59e0b", not_fit: "#6b7280" };
 
   const Progress = () => (
     <div style={s.progressBar}>
@@ -146,12 +213,11 @@ export default function ModexForm() {
 
   const nav = (onNext, nextLabel = "Next") => (
     <div style={s.navRow}>
-      {step > 0 && <button style={s.backBtn} onClick={() => setStep(s => s - 1)}>←</button>}
+      {step > 0 && <button style={s.backBtn} onClick={() => setStep(st => st - 1)}>←</button>}
       <button style={s.nextBtn(canAdvance())} onClick={() => canAdvance() && onNext()}>{nextLabel}</button>
     </div>
   );
 
-  // STEPS
   const renderStep = () => {
     if (step === 0) return (
       <>
@@ -194,12 +260,7 @@ export default function ModexForm() {
           ))}
         </div>
         {(form.industry === "Other" || (form.industry !== "" && !INDUSTRIES.slice(0,-1).includes(form.industry))) && (
-          <input
-            style={{ ...s.input, marginBottom: 16 }}
-            placeholder="Describe the industry…"
-            value={form.industry === "Other" ? "" : form.industry}
-            onChange={e => setForm(f => ({ ...f, industry: e.target.value || "Other" }))}
-          />
+          <input style={{ ...s.input, marginBottom: 16 }} placeholder="Describe the industry…" value={form.industry === "Other" ? "" : form.industry} onChange={e => setForm(f => ({ ...f, industry: e.target.value || "Other" }))} />
         )}
         <div style={s.fieldLabel}>Automation Level</div>
         <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
@@ -232,7 +293,6 @@ export default function ModexForm() {
         {nav(() => setStep(finalStep))}
       </>
     );
-    // Final step — priority + notes
     return (
       <>
         <div style={s.stepLabel}>Step {totalSteps} of {totalSteps}</div>
@@ -245,43 +305,37 @@ export default function ModexForm() {
         <div style={s.fieldLabel}>Anything else?</div>
         <textarea style={s.textarea} placeholder="Follow-up action, who to intro, timing..." value={form.notes} onChange={e => setForm(f => ({ ...f, notes: e.target.value }))} />
         <div style={s.navRow}>
-          <button style={s.backBtn} onClick={() => setStep(s => s - 1)}>←</button>
+          <button style={s.backBtn} onClick={() => setStep(st => st - 1)}>←</button>
           <button style={s.nextBtn(!!form.priority)} onClick={() => form.priority && handleSubmit()}>Save Entry ✓</button>
         </div>
       </>
     );
   };
 
-  // Sync status banner
   const SyncBanner = () => {
     if (!syncStatus) return null;
     const cfg = {
-      syncing: { bg: "#1a1a1a", border: "#333", color: "#888", text: "Syncing to Google Sheets…" },
-      ok:      { bg: "#052e16", border: "#166534", color: "#4ade80", text: "✓ Synced to Google Sheets" },
-      fail:    { bg: "#2d0a0a", border: "#7f1d1d", color: "#f87171", text: "⚠ Sheets sync failed — entry saved locally" },
+      ok:   { bg: "#052e16", border: "#166534", color: "#4ade80", text: "✓ Synced to Google Sheets" },
+      fail: { bg: "#2d0a0a", border: "#7f1d1d", color: "#f87171", text: "⚠ Sheets sync failed — entry saved locally" },
     }[syncStatus];
     return (
-      <div style={{ position: "sticky", top: 0, zIndex: 10, background: cfg.bg, border: `1px solid ${cfg.border}`, borderRadius: 8, padding: "10px 14px", marginBottom: 16, fontSize: 13, color: cfg.color, display: "flex", alignItems: "center", gap: 8 }}>
-        {syncStatus === "syncing" && <span style={{ display: "inline-block", width: 10, height: 10, border: `2px solid ${cfg.color}`, borderTopColor: "transparent", borderRadius: "50%", animation: "spin 0.7s linear infinite" }} />}
+      <div style={{ position: "sticky", top: 0, zIndex: 10, background: cfg.bg, border: `1px solid ${cfg.border}`, borderRadius: 8, padding: "10px 14px", marginBottom: 16, fontSize: 13, color: cfg.color }}>
         {cfg.text}
       </div>
     );
   };
 
-  const priorityColor = { hot: "#dc2626", warm: "#f59e0b", not_fit: "#6b7280" };
-
-  // LIST VIEW
   const ListView = () => (
     <>
-      <div style={{ marginBottom: 20, fontSize: 13, color: c.textMuted }}>{entries.length} conversation{entries.length !== 1 ? "s" : ""} captured</div>
-      {entries.length === 0 ? (
+      <div style={{ marginBottom: 20, fontSize: 13, color: c.textMuted }}>{localEntries.length} conversation{localEntries.length !== 1 ? "s" : ""} captured on this device</div>
+      {localEntries.length === 0 ? (
         <div style={{ textAlign: "center", padding: "60px 20px", color: c.textMuted }}>
           <div style={{ fontSize: 40, marginBottom: 12 }}>📋</div>
           <div>No entries yet. Go talk to people!</div>
         </div>
       ) : (
         <>
-          {entries.map((e, i) => (
+          {localEntries.map((e, i) => (
             <div key={e.id} style={s.entryCard} onClick={() => { setDetailIdx(i); setView("detail"); }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "start" }}>
                 <div>
@@ -298,7 +352,7 @@ export default function ModexForm() {
             </div>
           ))}
           <button style={{ ...s.backBtn, width: "100%", textAlign: "center", marginTop: 16, fontSize: 13 }} onClick={() => {
-            const csv = entriesToCSV(entries);
+            const csv = entriesToCSV(localEntries);
             const blob = new Blob([csv], { type: "text/csv" });
             const url = URL.createObjectURL(blob);
             const a = document.createElement("a");
@@ -310,10 +364,12 @@ export default function ModexForm() {
     </>
   );
 
-  // STATS VIEW
+  // STATS VIEW — powered entirely by live Google Sheets data
   const StatsView = () => {
     const typeColors = { customer: "#e5ff00", peer: "#6366f1", large_robotics: "#06b6d4", si: "#f59e0b", investor_other: "#a855f7" };
     const medals = ["🥇", "🥈", "🥉"];
+    const entries = sheetEntries;
+
     const personStats = TEAM.map(name => {
       const mine = entries.filter(e => e.recorder === name);
       const byType = {};
@@ -326,14 +382,28 @@ export default function ModexForm() {
 
     return (
       <>
-        <div style={{ marginBottom: 24 }}>
-          <div style={s.question}>Leaderboard</div>
-          <div style={{ fontSize: 13, color: c.textMuted }}>{entries.length} total conversation{entries.length !== 1 ? "s" : ""}</div>
+        <div style={{ marginBottom: 24, display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+          <div>
+            <div style={s.question}>Leaderboard</div>
+            <div style={{ fontSize: 13, color: c.textMuted }}>
+              {sheetLoading ? "Refreshing…" : sheetError ? "⚠ Couldn't load sheet data" : `${entries.length} total · live from Google Sheets`}
+            </div>
+          </div>
+          <button onClick={fetchSheetData} style={{ background: "none", border: `1px solid ${c.cardBorder}`, color: c.textMuted, borderRadius: 6, padding: "6px 10px", fontSize: 12, cursor: "pointer" }}>
+            {sheetLoading ? "⏳" : "↻ Refresh"}
+          </button>
         </div>
-        {entries.length === 0 ? (
+
+        {sheetLoading && entries.length === 0 ? (
           <div style={{ textAlign: "center", padding: "60px 20px", color: c.textMuted }}>
-            <div style={{ fontSize: 40, marginBottom: 12 }}>🏆</div>
-            <div>No entries yet. Race starts now!</div>
+            <div style={{ fontSize: 32, marginBottom: 12 }}>⏳</div>
+            <div>Loading live data…</div>
+          </div>
+        ) : sheetError && entries.length === 0 ? (
+          <div style={{ textAlign: "center", padding: "60px 20px", color: c.textMuted }}>
+            <div style={{ fontSize: 32, marginBottom: 12 }}>⚠️</div>
+            <div>Couldn't reach Google Sheets.<br/>Make sure the sheet is publicly accessible.</div>
+            <button onClick={fetchSheetData} style={{ marginTop: 16, ...s.backBtn, fontSize: 13 }}>Try again</button>
           </div>
         ) : (
           <>
@@ -381,8 +451,8 @@ export default function ModexForm() {
             {entries.some(e => e.priority === "hot") && (
               <div style={{ background: "#dc262615", border: "1px solid #dc262633", borderRadius: 12, padding: 16, marginTop: 12 }}>
                 <div style={{ fontSize: 13, fontWeight: 600, color: "#dc2626", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 10 }}>🔥 Hot Leads</div>
-                {entries.filter(e => e.priority === "hot").map(e => (
-                  <div key={e.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderBottom: "1px solid #dc262620" }}>
+                {entries.filter(e => e.priority === "hot").map((e, i) => (
+                  <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderBottom: "1px solid #dc262620" }}>
                     <div>
                       <span style={{ fontSize: 14, fontWeight: 500 }}>{e.companyName}</span>
                       <span style={{ fontSize: 12, color: c.textMuted, marginLeft: 8 }}>{TYPE_LABEL_SHORT[e.companyType]}</span>
@@ -398,10 +468,9 @@ export default function ModexForm() {
     );
   };
 
-  // DETAIL VIEW
   const DetailView = () => {
-    if (detailIdx === null || !entries[detailIdx]) return null;
-    const e = entries[detailIdx];
+    if (detailIdx === null || !localEntries[detailIdx]) return null;
+    const e = localEntries[detailIdx];
     const timeStr = new Date(e.timestamp).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
     return (
       <>
@@ -428,7 +497,7 @@ export default function ModexForm() {
         </>}
         {e.notes && <><div style={s.fieldLabel}>Follow-up Notes</div><div style={{ fontSize: 14, lineHeight: 1.5 }}>{e.notes}</div></>}
         <button style={{ ...s.backBtn, width: "100%", textAlign: "center", marginTop: 24, color: c.danger, borderColor: c.danger + "44", fontSize: 13 }}
-          onClick={() => { if (confirm("Delete this entry?")) handleDelete(e.id); }}>
+          onClick={() => { if (window.confirm("Delete this entry?")) handleDelete(e.id); }}>
           Delete Entry
         </button>
       </>
@@ -443,13 +512,12 @@ export default function ModexForm() {
 
   return (
     <div style={s.container}>
-      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
       <div style={s.header}>
         <div style={s.logo}>Index · MODEX '26</div>
         <div style={{ display: "flex", gap: 8 }}>
           <button style={s.headerBtn(view === "stats")} onClick={() => setView("stats")}>🏆</button>
           {view === "form" ? (
-            <button style={s.headerBtn(false)} onClick={() => setView("list")}>{entries.length > 0 ? `${entries.length} saved` : "View all"}</button>
+            <button style={s.headerBtn(false)} onClick={() => setView("list")}>{localEntries.length > 0 ? `${localEntries.length} saved` : "View all"}</button>
           ) : (
             <>
               <button style={s.headerBtn(view === "list")} onClick={() => setView("list")}>List</button>
@@ -461,12 +529,7 @@ export default function ModexForm() {
 
       <SyncBanner />
 
-      {view === "form" && (
-        <>
-          <Progress />
-          {renderStep()}
-        </>
-      )}
+      {view === "form" && (<><Progress />{renderStep()}</>)}
       {view === "list" && <ListView />}
       {view === "stats" && <StatsView />}
       {view === "detail" && <DetailView />}
