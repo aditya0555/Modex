@@ -327,15 +327,28 @@ export default function ModexForm() {
 
   const ListView = () => (
     <>
-      <div style={{ marginBottom: 20, fontSize: 13, color: c.textMuted }}>{localEntries.length} conversation{localEntries.length !== 1 ? "s" : ""} captured on this device</div>
-      {localEntries.length === 0 ? (
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+        <div style={{ fontSize: 13, color: c.textMuted }}>{sheetEntries.length} conversation{sheetEntries.length !== 1 ? "s" : ""} · live from Google Sheets</div>
+        <button onClick={fetchSheetData} style={{ background: "none", border: `1px solid ${c.cardBorder}`, color: c.textMuted, borderRadius: 6, padding: "5px 10px", fontSize: 12, cursor: "pointer" }}>
+          {sheetLoading ? "⏳" : "↻ Refresh"}
+        </button>
+      </div>
+      {sheetLoading && sheetEntries.length === 0 ? (
+        <div style={{ textAlign: "center", padding: "60px 20px", color: c.textMuted }}>Loading from Google Sheets…</div>
+      ) : sheetError && sheetEntries.length === 0 ? (
+        <div style={{ textAlign: "center", padding: "60px 20px", color: c.textMuted }}>
+          <div style={{ fontSize: 40, marginBottom: 12 }}>⚠️</div>
+          <div>Couldn't load from Google Sheets.</div>
+          <button onClick={fetchSheetData} style={{ marginTop: 16, ...s.backBtn, fontSize: 13 }}>Try again</button>
+        </div>
+      ) : sheetEntries.length === 0 ? (
         <div style={{ textAlign: "center", padding: "60px 20px", color: c.textMuted }}>
           <div style={{ fontSize: 40, marginBottom: 12 }}>📋</div>
           <div>No entries yet. Go talk to people!</div>
         </div>
       ) : (
         <>
-          {localEntries.map((e, i) => (
+          {sheetEntries.map((e, i) => (
             <div key={e.id} style={s.entryCard} onClick={() => { setDetailIdx(i); setView("detail"); }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "start" }}>
                 <div>
@@ -352,7 +365,7 @@ export default function ModexForm() {
             </div>
           ))}
           <button style={{ ...s.backBtn, width: "100%", textAlign: "center", marginTop: 16, fontSize: 13 }} onClick={() => {
-            const csv = entriesToCSV(localEntries);
+            const csv = entriesToCSV(sheetEntries);
             const blob = new Blob([csv], { type: "text/csv" });
             const url = URL.createObjectURL(blob);
             const a = document.createElement("a");
@@ -469,8 +482,8 @@ export default function ModexForm() {
   };
 
   const DetailView = () => {
-    if (detailIdx === null || !localEntries[detailIdx]) return null;
-    const e = localEntries[detailIdx];
+    if (detailIdx === null || !sheetEntries[detailIdx]) return null;
+    const e = sheetEntries[detailIdx];
     const timeStr = new Date(e.timestamp).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
     return (
       <>
